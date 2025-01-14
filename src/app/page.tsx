@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { optimizeRoutes } from '../utils/routeOptimizer';
 import { batchGeocodeAddresses, geocodeAddress } from '../utils/geocoding';
 import RouteMap from '../components/RouteMap';
-import type { Stop, School, OptimizationResult, StartLocation } from '../types/route';
+import type { Stop, School, OptimizationResult } from '../types/route';
 import { MorningOptimizationStrategy } from '../types/route';
 import sampleRouteData from '../data/sample-route-addresses.json';
 
@@ -57,9 +57,6 @@ export default function Home() {
   const [morningStrategy, setMorningStrategy] = useState<MorningOptimizationStrategy>(
     MorningOptimizationStrategy.DISTANCE_FROM_SCHOOL
   );
-  const [customStartAddress, setCustomStartAddress] = useState('');
-  const [customStartLocation, setCustomStartLocation] = useState<StartLocation | undefined>();
-  const [isGeocodingStart, setIsGeocodingStart] = useState(false);
 
   const handleJsonSubmit = useCallback(async () => {
     setIsLoading(true);
@@ -119,8 +116,7 @@ export default function Home() {
         reverseReturnOrder,
         prioritizeDirection,
         stopDuration,
-        morningStrategy,
-        customStartLocation
+        morningStrategy
       });
       setOptimizationResult(result);
     } catch (err) {
@@ -175,7 +171,6 @@ export default function Home() {
                   checked={morningStrategy === MorningOptimizationStrategy.MINIMIZE_RIDE_TIME}
                   onChange={() => {
                     setMorningStrategy(MorningOptimizationStrategy.MINIMIZE_RIDE_TIME);
-                    setCustomStartLocation(undefined);
                   }}
                   className="form-radio h-4 w-4 text-blue-600"
                 />
@@ -188,7 +183,6 @@ export default function Home() {
                   checked={morningStrategy === MorningOptimizationStrategy.MINIMIZE_TOTAL_DISTANCE}
                   onChange={() => {
                     setMorningStrategy(MorningOptimizationStrategy.MINIMIZE_TOTAL_DISTANCE);
-                    setCustomStartLocation(undefined);
                   }}
                   className="form-radio h-4 w-4 text-blue-600"
                 />
@@ -201,76 +195,11 @@ export default function Home() {
                   checked={morningStrategy === MorningOptimizationStrategy.DISTANCE_FROM_SCHOOL}
                   onChange={() => {
                     setMorningStrategy(MorningOptimizationStrategy.DISTANCE_FROM_SCHOOL);
-                    setCustomStartLocation(undefined);
                   }}
                   className="form-radio h-4 w-4 text-blue-600"
                 />
                 <span>Distance from School</span>
               </label>
-              <label className="flex items-center space-x-2">
-                <input
-                  type="radio"
-                  checked={morningStrategy === MorningOptimizationStrategy.DISTANCE_MATRIX}
-                  onChange={() => setMorningStrategy(MorningOptimizationStrategy.DISTANCE_MATRIX)}
-                  className="form-radio h-4 w-4 text-blue-600"
-                />
-                <span>Distance Matrix</span>
-              </label>
-              <label className="flex items-center space-x-2">
-                <input
-                  type="radio"
-                  checked={morningStrategy === MorningOptimizationStrategy.NEAREST_NEIGHBOR}
-                  onChange={() => setMorningStrategy(MorningOptimizationStrategy.NEAREST_NEIGHBOR)}
-                  className="form-radio h-4 w-4 text-blue-600"
-                />
-                <span>Nearest Neighbor</span>
-              </label>
-
-              {(morningStrategy === MorningOptimizationStrategy.DISTANCE_MATRIX || 
-                morningStrategy === MorningOptimizationStrategy.NEAREST_NEIGHBOR) && (
-                <div className="mt-2 space-y-2">
-                  <div className="text-sm">Custom Start Location (optional):</div>
-                  <div className="flex space-x-2">
-                    <input
-                      type="text"
-                      value={customStartAddress}
-                      onChange={(e) => setCustomStartAddress(e.target.value)}
-                      placeholder="Enter start address"
-                      className="flex-1 px-2 py-1 border rounded text-sm"
-                    />
-                    <button
-                      onClick={async () => {
-                        if (!customStartAddress) {
-                          setCustomStartLocation(undefined);
-                          return;
-                        }
-                        setIsGeocodingStart(true);
-                        try {
-                          const result = await geocodeAddress(customStartAddress);
-                          setCustomStartLocation({
-                            address: result.formattedAddress,
-                            location: result.location
-                          });
-                        } catch (error: unknown) {
-                          console.error('Geocoding error:', error);
-                          setError('Failed to geocode start address');
-                        } finally {
-                          setIsGeocodingStart(false);
-                        }
-                      }}
-                      className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 disabled:opacity-50"
-                      disabled={isGeocodingStart}
-                    >
-                      {isGeocodingStart ? 'Setting...' : 'Set'}
-                    </button>
-                  </div>
-                  {customStartLocation && (
-                    <div className="text-sm text-green-600">
-                      Start: {customStartLocation.address}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
 
             <label className="flex items-center space-x-2">

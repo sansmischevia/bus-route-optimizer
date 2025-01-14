@@ -1,4 +1,4 @@
-import type { Stop, BusRoute, School, OptimizationResult, RouteSegment, Location, StartLocation } from '../types/route';
+import type { Stop, BusRoute, School, OptimizationResult, RouteSegment, StartLocation } from '../types/route';
 import { MorningOptimizationStrategy } from '../types/route';
 import { getTravelEstimate } from './trafficService';
 
@@ -23,104 +23,6 @@ interface OptimizationOptions {
   stopDuration?: number;
   morningStrategy?: MorningOptimizationStrategy;
   customStartLocation?: StartLocation;
-}
-
-async function calculateDistanceMatrix(stops: Stop[], school: School): Promise<number[][]> {
-  const allPoints = [...stops.map(s => s.location), school.location];
-  const matrix: number[][] = Array(allPoints.length).fill(0).map(() => Array(allPoints.length).fill(0));
-  
-  for (let i = 0; i < allPoints.length; i++) {
-    for (let j = 0; j < allPoints.length; j++) {
-      if (i !== j) {
-        const estimate = await getTravelEstimate(allPoints[i], allPoints[j], new Date());
-        matrix[i][j] = estimate.distance;
-      }
-    }
-  }
-  
-  return matrix;
-}
-
-function findNearestNeighbor(current: Location, unvisited: Stop[], matrix: number[][]): number {
-  let minDistance = Infinity;
-  let nearestIndex = -1;
-  const currentIndex = unvisited.length; // Current point is always last in the matrix
-  
-  for (let i = 0; i < unvisited.length; i++) {
-    const distance = matrix[currentIndex][i];
-    if (distance < minDistance) {
-      minDistance = distance;
-      nearestIndex = i;
-    }
-  }
-  
-  return nearestIndex;
-}
-
-async function optimizeByDistanceMatrix(stops: Stop[], school: School, startLocation?: StartLocation): Promise<Stop[]> {
-  const allPoints = [...stops.map(s => s.location)];
-  const startPoint = startLocation ? startLocation.location : school.location;
-  const matrix: number[][] = Array(allPoints.length + 1).fill(0).map(() => Array(allPoints.length + 1).fill(0));
-  
-  // Calculate distances between all points including start point
-  for (let i = 0; i <= allPoints.length; i++) {
-    for (let j = 0; j <= allPoints.length; j++) {
-      if (i !== j) {
-        const fromPoint = i === allPoints.length ? startPoint : allPoints[i];
-        const toPoint = j === allPoints.length ? startPoint : allPoints[j];
-        const estimate = await getTravelEstimate(fromPoint, toPoint, new Date());
-        matrix[i][j] = estimate.distance;
-      }
-    }
-  }
-  
-  const optimizedStops: Stop[] = [];
-  const unvisited = [...stops];
-  
-  while (unvisited.length > 0) {
-    let minDistance = Infinity;
-    let nextStopIndex = -1;
-    
-    for (let i = 0; i < unvisited.length; i++) {
-      const distance = matrix[optimizedStops.length][i];
-      if (distance < minDistance) {
-        minDistance = distance;
-        nextStopIndex = i;
-      }
-    }
-    
-    const nextStop = unvisited[nextStopIndex];
-    optimizedStops.push(nextStop);
-    unvisited.splice(nextStopIndex, 1);
-  }
-  
-  return optimizedStops;
-}
-
-async function optimizeByNearestNeighbor(stops: Stop[], school: School, startLocation?: StartLocation): Promise<Stop[]> {
-  const optimizedStops: Stop[] = [];
-  const unvisited = [...stops];
-  let currentLocation = startLocation ? startLocation.location : school.location;
-  
-  while (unvisited.length > 0) {
-    let minDistance = Infinity;
-    let nextStopIndex = -1;
-    
-    for (let i = 0; i < unvisited.length; i++) {
-      const estimate = await getTravelEstimate(currentLocation, unvisited[i].location, new Date());
-      if (estimate.distance < minDistance) {
-        minDistance = estimate.distance;
-        nextStopIndex = i;
-      }
-    }
-    
-    const nextStop = unvisited[nextStopIndex];
-    optimizedStops.push(nextStop);
-    currentLocation = nextStop.location;
-    unvisited.splice(nextStopIndex, 1);
-  }
-  
-  return optimizedStops;
 }
 
 async function optimizeByDistanceFromSchool(stops: Stop[], school: School): Promise<Stop[]> {
@@ -358,12 +260,6 @@ export async function optimizeRoutes(
   // Sort stops based on selected strategy
   let sortedStops: Stop[];
   switch (options.morningStrategy) {
-    case MorningOptimizationStrategy.DISTANCE_MATRIX:
-      sortedStops = await optimizeByDistanceMatrix(stops, school, options.customStartLocation);
-      break;
-    case MorningOptimizationStrategy.NEAREST_NEIGHBOR:
-      sortedStops = await optimizeByNearestNeighbor(stops, school, options.customStartLocation);
-      break;
     case MorningOptimizationStrategy.MINIMIZE_RIDE_TIME:
       sortedStops = await optimizeByMinimizeRideTime(stops, school);
       break;
