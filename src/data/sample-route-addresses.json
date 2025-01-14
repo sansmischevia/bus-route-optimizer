@@ -1,0 +1,46 @@
+{
+  "school": {
+    "name": "Mount Tamalpais School",
+    "address": "100 Harvard Ave, Mill Valley, CA 94941",
+    "arrivalTime": "08:05",
+    "departureTime": "15:18"
+  },
+  "stops": [
+    {
+      "address": "California St & 22nd Ave, San Francisco, CA",
+      "numKids": 5,
+      "cluster": "A"
+    },
+    {
+      "address": "Jackson St & Cherry St, San Francisco, CA",
+      "numKids": 4,
+      "cluster": "A"
+    },
+    {
+      "address": "Main Post Parade Grounds, Presidio, San Francisco, CA",
+      "numKids": 6,
+      "cluster": "A"
+    },
+    {
+      "address": "California St & 12th Ave, San Francisco, CA",
+      "numKids": 3,
+      "cluster": "A"
+    },
+    {
+      "address": "California St & Divisadero St, San Francisco, CA",
+      "numKids": 4,
+      "cluster": "A"
+    },
+    {
+      "address": "Spencer Ave Bus Pad, Sausalito, CA",
+      "numKids": 5,
+      "cluster": "B"
+    },
+    {
+      "address": "Donahue St & Terners Dr, Marin City, CA",
+      "numKids": 6,
+      "cluster": "B"
+    }
+  ],
+  "busCapacities": [50, 50]
+} 
