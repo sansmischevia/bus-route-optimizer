@@ -1,4 +1,4 @@
-import type { Stop, BusRoute, School, OptimizationResult, RouteSegment, StartLocation } from '../types/route';
+import type { Stop, BusRoute, School, OptimizationResult, RouteSegment, StartLocation, Location } from '../types/route';
 import { MorningOptimizationStrategy } from '../types/route';
 import { getTravelEstimate } from './trafficService';
 
@@ -25,38 +25,21 @@ interface OptimizationOptions {
   customStartLocation?: StartLocation;
 }
 
-async function optimizeByDistanceFromSchool(stops: Stop[], school: School): Promise<Stop[]> {
-  const travelEstimates = await Promise.all(
-    stops.map(stop => 
-      getTravelEstimate(
-        stop.location,
-        school.location,
-        new Date()
-      )
-    )
+// Utility function to get travel estimates from all stops to a destination
+async function getTravelEstimatesToDestination(stops: Stop[], destination: Location): Promise<{ [key: string]: number }> {
+  const estimates = await Promise.all(
+    stops.map(stop => getTravelEstimate(stop.location, destination, new Date()))
   );
-
-  return [...stops].sort((a, b) => {
-    const indexA = stops.indexOf(a);
-    const indexB = stops.indexOf(b);
-    return travelEstimates[indexB].duration - travelEstimates[indexA].duration;
-  });
+  
+  return stops.reduce((acc, stop, index) => {
+    acc[stop.address] = estimates[index].duration;
+    return acc;
+  }, {} as { [key: string]: number });
 }
 
-async function optimizeByMinimizeRideTime(stops: Stop[], school: School): Promise<Stop[]> {
-  // Get travel times from all stops to school
-  const schoolEstimates = await Promise.all(
-    stops.map(stop => 
-      getTravelEstimate(
-        stop.location,
-        school.location,
-        new Date()
-      )
-    )
-  );
-
-  // Calculate all pairwise travel times between stops
-  const travelTimes: { [key: string]: number } = {};
+// Utility function to calculate pairwise metrics between stops
+async function calculatePairwiseMetrics(stops: Stop[], metric: 'duration' | 'distance'): Promise<{ [key: string]: number }> {
+  const metrics: { [key: string]: number } = {};
   for (let i = 0; i < stops.length; i++) {
     for (let j = i + 1; j < stops.length; j++) {
       const estimate = await getTravelEstimate(
@@ -64,27 +47,163 @@ async function optimizeByMinimizeRideTime(stops: Stop[], school: School): Promis
         stops[j].location,
         new Date()
       );
-      travelTimes[`${i}-${j}`] = estimate.duration;
-      travelTimes[`${j}-${i}`] = estimate.duration;
+      metrics[`${i}-${j}`] = estimate[metric];
+      metrics[`${j}-${i}`] = estimate[metric];
+    }
+  }
+  return metrics;
+}
+
+// Generic 2-opt local search optimization
+function optimizeSequenceWith2Opt<T>(
+  sequence: T[],
+  calculateMetric: (seq: T[]) => number,
+  maxIterations: number = 100
+): T[] {
+  let bestSequence = [...sequence];
+  let bestMetric = calculateMetric(bestSequence);
+  
+  let improved = true;
+  let iterations = 0;
+  
+  while (improved && iterations < maxIterations) {
+    improved = false;
+    iterations++;
+    
+    for (let i = 0; i < bestSequence.length - 1; i++) {
+      for (let j = i + 1; j < bestSequence.length; j++) {
+        const newSequence = [...bestSequence];
+        const subarray = newSequence.slice(i, j + 1);
+        newSequence.splice(i, subarray.length, ...subarray.reverse());
+        
+        const newMetric = calculateMetric(newSequence);
+        if (newMetric < bestMetric) {
+          bestSequence = newSequence;
+          bestMetric = newMetric;
+          improved = true;
+          break;
+        }
+      }
+      if (improved) break;
+    }
+  }
+  
+  return bestSequence;
+}
+
+// Utility function to calculate route segments
+async function calculateRouteSegments(
+  stops: Stop[],
+  school: School,
+  currentTime: number,
+  stopDuration: number = 0,
+  isReturn: boolean = false
+): Promise<{
+  segments: RouteSegment[];
+  estimatedTimes: { [key: string]: number };
+  routeDistance: number;
+  routeTime: number;
+  maxRideTime: number;
+  minRideTime: number;
+}> {
+  const segments: RouteSegment[] = [];
+  const estimatedTimes: { [key: string]: number } = {};
+  let routeDistance = 0;
+  let routeTime = 0;
+  let maxRideTime = 0;
+  let minRideTime = Infinity;
+
+  // For morning routes:
+  // 1. Calculate all segments and times going forward
+  // 2. Then calculate pickup times going backward from school arrival
+  const workingStops = [...stops];
+  let time = currentTime;
+
+  // First, calculate segments and total distance/time
+  for (let i = 0; i < workingStops.length; i++) {
+    const currentStop = workingStops[i];
+    const nextStop = i < workingStops.length - 1 ? workingStops[i + 1] : null;
+    const destination = nextStop ? nextStop.location : school.location;
+    const destinationName = nextStop ? nextStop.address : school.name;
+
+    const estimate = await getTravelEstimate(
+      currentStop.location,
+      destination,
+      getDateWithTime(time)
+    );
+
+    segments.push({
+      from: currentStop.address,
+      to: destinationName,
+      duration: estimate.duration,
+      distance: estimate.distance
+    });
+
+    routeDistance += estimate.distance;
+    routeTime += estimate.duration + (nextStop ? stopDuration : 0);
+  }
+
+  // For morning routes, calculate pickup times backwards from school arrival
+  if (!isReturn) {
+    time = currentTime; // School arrival time
+    for (let i = workingStops.length - 1; i >= 0; i--) {
+      const currentStop = workingStops[i];
+      const segment = segments[i];
+      time -= (segment.duration + stopDuration);
+      estimatedTimes[currentStop.address] = time;
+      
+      const rideTime = currentTime - time;
+      maxRideTime = Math.max(maxRideTime, rideTime);
+      minRideTime = Math.min(minRideTime, rideTime);
+    }
+  } else {
+    // For return routes, calculate drop-off times forward from school departure
+    time = currentTime; // School departure time
+    for (let i = 0; i < workingStops.length; i++) {
+      const currentStop = workingStops[i];
+      const segment = segments[i];
+      time += (segment.duration + stopDuration);
+      estimatedTimes[currentStop.address] = time;
+      
+      const rideTime = time - currentTime;
+      maxRideTime = Math.max(maxRideTime, rideTime);
+      minRideTime = Math.min(minRideTime, rideTime);
     }
   }
 
-  // Helper function to calculate weighted total ride time for a given sequence
+  return {
+    segments,
+    estimatedTimes,
+    routeDistance,
+    routeTime,
+    maxRideTime,
+    minRideTime
+  };
+}
+
+async function optimizeByDistanceFromSchool(stops: Stop[], school: School): Promise<Stop[]> {
+  const travelEstimates = await getTravelEstimatesToDestination(stops, school.location);
+  
+  return [...stops].sort((a, b) => travelEstimates[b.address] - travelEstimates[a.address]);
+}
+
+async function optimizeByMinimizeRideTime(stops: Stop[], school: School): Promise<Stop[]> {
+  const schoolEstimates = await getTravelEstimatesToDestination(stops, school.location);
+  const travelTimes = await calculatePairwiseMetrics(stops, 'duration');
+
   function calculateWeightedRideTime(sequence: Stop[]): number {
     let totalWeightedTime = 0;
     for (let i = 0; i < sequence.length; i++) {
-      const stopIndex = stops.indexOf(sequence[i]);
-      const timeToSchool = schoolEstimates[stopIndex].duration;
+      const timeToSchool = schoolEstimates[sequence[i].address];
       
-      // Add cumulative time from previous stops
       let additionalTime = 0;
       for (let j = i + 1; j < sequence.length; j++) {
-        const prevStopIndex = stops.indexOf(sequence[j-1]);
-        const currStopIndex = stops.indexOf(sequence[j]);
-        additionalTime += travelTimes[`${prevStopIndex}-${currStopIndex}`];
+        const prevStop = sequence[j-1];
+        const currStop = sequence[j];
+        const key = `${stops.indexOf(prevStop)}-${stops.indexOf(currStop)}`;
+        additionalTime += travelTimes[key];
       }
       
-      // Weight the total ride time by number of kids at this stop
       const totalRideTime = timeToSchool + additionalTime;
       totalWeightedTime += totalRideTime * sequence[i].numKids;
     }
@@ -92,138 +211,42 @@ async function optimizeByMinimizeRideTime(stops: Stop[], school: School): Promis
   }
 
   // Start with stops sorted by weighted time from school
-  let bestSequence = [...stops].sort((a, b) => {
-    const indexA = stops.indexOf(a);
-    const indexB = stops.indexOf(b);
-    // Weight the time by number of kids
-    const weightedTimeA = schoolEstimates[indexA].duration * a.numKids;
-    const weightedTimeB = schoolEstimates[indexB].duration * b.numKids;
-    return weightedTimeB - weightedTimeA;
-  });
+  const initialSequence = [...stops].sort((a, b) => 
+    (schoolEstimates[b.address] * b.numKids) - (schoolEstimates[a.address] * a.numKids)
+  );
 
-  let bestWeightedTime = calculateWeightedRideTime(bestSequence);
-
-  // Try to improve the sequence using 2-opt local search
-  let improved = true;
-  let iterations = 0;
-  const MAX_ITERATIONS = 100; // Prevent infinite loops
-  
-  while (improved && iterations < MAX_ITERATIONS) {
-    improved = false;
-    iterations++;
-    
-    for (let i = 0; i < bestSequence.length - 1; i++) {
-      for (let j = i + 1; j < bestSequence.length; j++) {
-        // Create new sequence by reversing subarray from i to j
-        const newSequence = [...bestSequence];
-        const subarray = newSequence.slice(i, j + 1);
-        newSequence.splice(i, subarray.length, ...subarray.reverse());
-        
-        const newWeightedTime = calculateWeightedRideTime(newSequence);
-        if (newWeightedTime < bestWeightedTime) {
-          bestSequence = newSequence;
-          bestWeightedTime = newWeightedTime;
-          improved = true;
-          break;
-        }
-      }
-      if (improved) break;
-    }
-  }
-
-  return bestSequence;
+  return optimizeSequenceWith2Opt(initialSequence, calculateWeightedRideTime);
 }
 
 async function optimizeByMinimizeTotalDistance(stops: Stop[], school: School): Promise<Stop[]> {
-  // Get distances from all stops to school
-  const schoolEstimates = await Promise.all(
-    stops.map(stop => 
-      getTravelEstimate(
-        stop.location,
-        school.location,
-        new Date()
-      )
-    )
-  );
+  const schoolEstimates = await getTravelEstimatesToDestination(stops, school.location);
+  const distances = await calculatePairwiseMetrics(stops, 'distance');
 
-  // Calculate all pairwise distances between stops
-  const distances: { [key: string]: number } = {};
-  for (let i = 0; i < stops.length; i++) {
-    for (let j = i + 1; j < stops.length; j++) {
-      const estimate = await getTravelEstimate(
-        stops[i].location,
-        stops[j].location,
-        new Date()
-      );
-      distances[`${i}-${j}`] = estimate.distance;
-      distances[`${j}-${i}`] = estimate.distance;
-    }
-  }
-
-  // Helper function to calculate total distance for a given sequence
   function calculateTotalDistance(sequence: Stop[]): number {
     let totalDistance = 0;
     
-    // Add distance from first stop to school
     if (sequence.length > 0) {
-      const firstStopIndex = stops.indexOf(sequence[0]);
-      totalDistance += schoolEstimates[firstStopIndex].distance;
-    }
-    
-    // Add distances between consecutive stops
-    for (let i = 0; i < sequence.length - 1; i++) {
-      const currentStopIndex = stops.indexOf(sequence[i]);
-      const nextStopIndex = stops.indexOf(sequence[i + 1]);
-      totalDistance += distances[`${currentStopIndex}-${nextStopIndex}`];
-    }
-    
-    // Add distance from last stop to school
-    if (sequence.length > 0) {
-      const lastStopIndex = stops.indexOf(sequence[sequence.length - 1]);
-      totalDistance += schoolEstimates[lastStopIndex].distance;
+      totalDistance += schoolEstimates[sequence[0].address];
+      
+      for (let i = 0; i < sequence.length - 1; i++) {
+        const currentStop = sequence[i];
+        const nextStop = sequence[i + 1];
+        const key = `${stops.indexOf(currentStop)}-${stops.indexOf(nextStop)}`;
+        totalDistance += distances[key];
+      }
+      
+      totalDistance += schoolEstimates[sequence[sequence.length - 1].address];
     }
     
     return totalDistance;
   }
 
   // Start with stops sorted by distance from school
-  let bestSequence = [...stops].sort((a, b) => {
-    const indexA = stops.indexOf(a);
-    const indexB = stops.indexOf(b);
-    return schoolEstimates[indexB].distance - schoolEstimates[indexA].distance;
-  });
+  const initialSequence = [...stops].sort((a, b) => 
+    schoolEstimates[b.address] - schoolEstimates[a.address]
+  );
 
-  let bestTotalDistance = calculateTotalDistance(bestSequence);
-
-  // Try to improve the sequence using 2-opt local search
-  let improved = true;
-  let iterations = 0;
-  const MAX_ITERATIONS = 100; // Prevent infinite loops
-  
-  while (improved && iterations < MAX_ITERATIONS) {
-    improved = false;
-    iterations++;
-    
-    for (let i = 0; i < bestSequence.length - 1; i++) {
-      for (let j = i + 1; j < bestSequence.length; j++) {
-        // Create new sequence by reversing subarray from i to j
-        const newSequence = [...bestSequence];
-        const subarray = newSequence.slice(i, j + 1);
-        newSequence.splice(i, subarray.length, ...subarray.reverse());
-        
-        const newTotalDistance = calculateTotalDistance(newSequence);
-        if (newTotalDistance < bestTotalDistance) {
-          bestSequence = newSequence;
-          bestTotalDistance = newTotalDistance;
-          improved = true;
-          break;
-        }
-      }
-      if (improved) break;
-    }
-  }
-
-  return bestSequence;
+  return optimizeSequenceWith2Opt(initialSequence, calculateTotalDistance);
 }
 
 function calculateStudentMinutes(stops: Stop[], estimatedTimes: { [key: string]: number }, schoolArrivalTime: number): number {
@@ -313,75 +336,26 @@ export async function optimizeRoutes(
     const busStops = stopGroups[busIndex];
     if (busStops.length === 0) continue;
 
-    // Start from the furthest stop and work towards school
-    const optimizedStops: Stop[] = [];
-    const segments: RouteSegment[] = [];
-    let routeDistance = 0;
-    let routeTime = 0;
+    // Calculate morning route segments
+    const morningRoute = await calculateRouteSegments(
+      busStops,
+      school,
+      schoolArrivalTime,
+      options.stopDuration,
+      false // isReturn = false
+    );
 
-    let currentTime = schoolArrivalTime;
-    const estimatedTimes: { [key: string]: number } = {};
-    let maxRideTime = 0;
-    let minRideTime = Infinity;
-
-    // Work backwards from school to calculate pickup times
-    for (let i = busStops.length - 1; i >= 0; i--) {
-      const currentStop = busStops[i];
-      const nextStop = i < busStops.length - 1 ? busStops[i + 1] : null;
-      const destination = nextStop ? nextStop.location : school.location;
-      const destinationName = nextStop ? nextStop.address : school.name;
-
-      const estimate = await getTravelEstimate(
-        currentStop.location,
-        destination,
-        getDateWithTime(currentTime)
-      );
-
-      segments.push({
-        from: currentStop.address,
-        to: destinationName,
-        duration: estimate.duration,
-        distance: estimate.distance
-      });
-
-      // Add stop duration to the timing calculations
-      currentTime -= (estimate.duration + (options.stopDuration || 0));
-      estimatedTimes[currentStop.address] = currentTime;
-      
-      const rideTime = schoolArrivalTime - currentTime;
-      maxRideTime = Math.max(maxRideTime, rideTime);
-      minRideTime = Math.min(minRideTime, rideTime);
-      
-      if (nextStop) {
-        routeDistance += estimate.distance;
-        routeTime += estimate.duration + (options.stopDuration || 0);
-      } else {
-        routeDistance += estimate.distance;
-        routeTime += estimate.duration;
-      }
-      
-      optimizedStops.push(currentStop);
-    }
-
-    // Calculate return trip if needed
-    const returnSegments: RouteSegment[] = [];
-    const returnTimes: { [key: string]: number } = {};
-
+    // Calculate return route if needed
+    let returnRoute = null;
     if (options.includeReturn) {
-      const returnTime = schoolDepartureTime;
       let returnStops: Stop[];
 
       if (options.reverseReturnOrder) {
-        // Reverse morning route exactly
-        returnStops = [...optimizedStops].reverse();
+        returnStops = [...busStops].reverse();
       } else if (options.prioritizeDirection) {
-        // Sort stops by latitude (north to south), assuming school is north of SF
-        returnStops = [...optimizedStops].sort((a, b) => {
-          return b.location.lat - a.location.lat;
-        });
+        returnStops = [...busStops].sort((a, b) => b.location.lat - a.location.lat);
       } else {
-        // Use proximity-based ordering from school
-        returnStops = [...optimizedStops].sort((a, b) => {
+        returnStops = [...busStops].sort((a, b) => {
           const distA = Math.sqrt(
             Math.pow(a.location.lat - school.location.lat, 2) + 
             Math.pow(a.location.lng - school.location.lng, 2)
@@ -394,90 +368,43 @@ export async function optimizeRoutes(
         });
       }
 
-      // Calculate all travel segments first
-      const returnEstimates = await Promise.all([
-        // First segment: school to first stop
-        getTravelEstimate(
-          school.location,
-          returnStops[0].location,
-          getDateWithTime(returnTime)
-        ),
-        // Remaining segments: between stops
-        ...returnStops.slice(1).map((stop, i) => 
-          getTravelEstimate(
-            returnStops[i].location,
-            stop.location,
-            getDateWithTime(returnTime)
-          )
-        )
-      ]);
-
-      // Calculate cumulative times by adding travel times and stop durations
-      let currentTime = returnTime;
-      
-      // First stop: departure time + travel from school + stop duration
-      returnSegments.push({
-        from: school.name,
-        to: returnStops[0].address,
-        duration: returnEstimates[0].duration,
-        distance: returnEstimates[0].distance
-      });
-      
-      currentTime += returnEstimates[0].duration + (options.stopDuration || 0);
-      returnTimes[returnStops[0].address] = currentTime;
-      routeDistance += returnEstimates[0].distance;
-      routeTime += returnEstimates[0].duration + (options.stopDuration || 0);
-
-      // Remaining stops
-      for (let i = 1; i < returnStops.length; i++) {
-        const estimate = returnEstimates[i];
-        
-        returnSegments.push({
-          from: returnStops[i-1].address,
-          to: returnStops[i].address,
-          duration: estimate.duration,
-          distance: estimate.distance
-        });
-
-        currentTime += estimate.duration + (options.stopDuration || 0);
-        returnTimes[returnStops[i].address] = currentTime;
-        
-        routeDistance += estimate.distance;
-        routeTime += estimate.duration + (options.stopDuration || 0);
-      }
+      returnRoute = await calculateRouteSegments(
+        returnStops,
+        school,
+        schoolDepartureTime,
+        options.stopDuration,
+        true // isReturn = true
+      );
     }
 
-    // Reverse the arrays since we built them backwards
-    optimizedStops.reverse();
-    segments.reverse();
+    // Update global metrics
+    globalMaxRideTime = Math.max(globalMaxRideTime, morningRoute.maxRideTime);
+    globalMinRideTime = Math.min(globalMinRideTime, morningRoute.minRideTime);
+    totalDistance += morningRoute.routeDistance + (returnRoute?.routeDistance || 0);
+    totalTime += morningRoute.routeTime + (returnRoute?.routeTime || 0);
 
-    globalMaxRideTime = Math.max(globalMaxRideTime, maxRideTime);
-    globalMinRideTime = Math.min(globalMinRideTime, minRideTime);
-
+    // Create the route object
     routes.push({
       id: `bus-${busIndex + 1}`,
       busCapacity: busCapacities[busIndex],
-      currentKids: optimizedStops.reduce((sum, stop) => sum + stop.numKids, 0),
-      stops: optimizedStops,
-      estimatedTimes,
-      segments,
-      returnSegments: options.includeReturn ? returnSegments : undefined,
-      returnTimes: options.includeReturn ? returnTimes : undefined,
-      maxRideTime,
-      minRideTime,
-      rideTimeEquity: maxRideTime - minRideTime,
-      totalStudentMinutes: calculateStudentMinutes(optimizedStops, estimatedTimes, schoolArrivalTime),
+      currentKids: busStops.reduce((sum, stop) => sum + stop.numKids, 0),
+      stops: busStops,
+      estimatedTimes: morningRoute.estimatedTimes,
+      segments: morningRoute.segments,
+      returnSegments: returnRoute?.segments,
+      returnTimes: returnRoute?.estimatedTimes,
+      maxRideTime: morningRoute.maxRideTime,
+      minRideTime: morningRoute.minRideTime,
+      rideTimeEquity: morningRoute.maxRideTime - morningRoute.minRideTime,
+      totalStudentMinutes: calculateStudentMinutes(busStops, morningRoute.estimatedTimes, schoolArrivalTime),
       totalRideTime: options.includeReturn ? 
         // For return trips: time from first pickup to school + time from school to last dropoff
-        (schoolArrivalTime - Math.min(...Object.values(estimatedTimes))) + 
-        (Math.max(...Object.values(returnTimes || {})) - schoolDepartureTime)
+        (schoolArrivalTime - Math.min(...Object.values(morningRoute.estimatedTimes))) + 
+        (Math.max(...Object.values(returnRoute?.estimatedTimes || {})) - schoolDepartureTime)
         : 
         // For morning only: time from first pickup to school arrival
-        schoolArrivalTime - Math.min(...Object.values(estimatedTimes))
+        schoolArrivalTime - Math.min(...Object.values(morningRoute.estimatedTimes))
     });
-
-    totalDistance += routeDistance;
-    totalTime += routeTime;
   }
 
   const result: OptimizationResult = {
